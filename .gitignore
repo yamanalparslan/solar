@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Veritabanı (üretim veritabanları repoya eklenmemeli)
+*.db
+*.sqlite
+*.sqlite3
+
+# Ortam değişkenleri (hassas bilgiler)
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+docker-compose.override.yml
+
+# Test
+test_security.db
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Logs
+*.log
+
+# Virtual environment
+venv/
+
+# PID files
+*.pid
+
+# Data directory
+data/

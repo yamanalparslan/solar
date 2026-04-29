@@ -9,10 +9,9 @@ import veritabani
 
 import sys
 import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+# Görünmez log sorununu çözmek için line_buffering=True eklendi
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
-INTER_REQUEST_DELAY = 0.25
-BLOCK_CANDIDATE_SIZE = 4
 WS_NOTIFY_URL = os.getenv("WS_NOTIFY_URL", "http://solar_api:8503/ws/notify")
 
 
@@ -69,65 +68,6 @@ def load_config(fabrika_id="mekanik"):
     }
 
 
-def read_registers(client, function_name, address, count, slave_id):
-    method = client.read_holding_registers if function_name == "holding" else client.read_input_registers
-    rr = method(address=address, count=count, slave=slave_id)
-    if rr.isError():
-        return None
-    return rr.registers
-
-
-def _unique_candidates(candidates):
-    unique = []
-    seen = set()
-    for candidate in candidates:
-        if candidate in seen:
-            continue
-        seen.add(candidate)
-        unique.append(candidate)
-    return unique
-
-
-def build_metric_candidates(address):
-    candidates = [
-        ("holding", address, 1, 0),
-        ("input", address, 1, 0),
-    ]
-
-    block_starts = [address]
-    for offset in range(1, BLOCK_CANDIDATE_SIZE):
-        start_addr = address - offset
-        if start_addr >= 0:
-            block_starts.append(start_addr)
-
-    for start_addr in block_starts:
-        index = address - start_addr
-        candidates.append(("holding", start_addr, BLOCK_CANDIDATE_SIZE, index))
-        candidates.append(("input", start_addr, BLOCK_CANDIDATE_SIZE, index))
-
-    return _unique_candidates(candidates)
-
-
-def read_metric_with_fallback(client, address, slave_id, cache):
-    for function_name, start_addr, count, index in build_metric_candidates(address):
-        cache_key = (function_name, start_addr, count)
-        if cache_key not in cache:
-            try:
-                cache[cache_key] = read_registers(client, function_name, start_addr, count, slave_id)
-            except Exception:
-                cache[cache_key] = None
-            time.sleep(INTER_REQUEST_DELAY)
-
-        registers = cache[cache_key]
-        if registers is None or index >= len(registers):
-            continue
-
-        source = f"{function_name}:{start_addr}/{count}[{index}]"
-        return registers[index], source
-
-    return None, "-"
-
-
 def read_device(client, slave_id, config, max_retries=3):
     for attempt in range(max_retries):
         try:
@@ -135,11 +75,25 @@ def read_device(client, slave_id, config, max_retries=3):
                 client.connect()
                 time.sleep(0.1)
 
-            cache = {}
-            raw_guc, src_guc = read_metric_with_fallback(client, config["guc_addr"], slave_id, cache)
-            raw_volt, src_volt = read_metric_with_fallback(client, config["volt_addr"], slave_id, cache)
-            raw_akim, src_akim = read_metric_with_fallback(client, config["akim_addr"], slave_id, cache)
-            raw_isi, src_isi = read_metric_with_fallback(client, config["isi_addr"], slave_id, cache)
+            # --- YENİ AKILLI VE HIZLI OKUMA FONKSİYONU ---
+            def hizli_oku(adres):
+                time.sleep(0.05)
+                # 1. İhtimal: Anlık veriler genelde Input Register'da (04) olur
+                rr = client.read_input_registers(address=adres, count=1, slave=slave_id)
+                
+                # 2. İhtimal: Eğer Input'ta yoksa veya hata verirse Holding Register'a (03) bak
+                if getattr(rr, 'isError', lambda: True)():
+                    rr = client.read_holding_registers(address=adres, count=1, slave=slave_id)
+                    
+                return rr.registers[0] if not getattr(rr, 'isError', lambda: True)() else None
+
+            # Hantal cache mantığı silindi, doğrudan hızlı okuma yapılıyor
+            raw_guc = hizli_oku(config["guc_addr"])
+            raw_volt = hizli_oku(config["volt_addr"])
+            raw_akim = hizli_oku(config["akim_addr"])
+            raw_isi = hizli_oku(config["isi_addr"])
+            
+            src_guc, src_volt, src_akim, src_isi = "hizli_oku", "hizli_oku", "hizli_oku", "hizli_oku"
 
             available_metric_count = sum(value is not None for value in (raw_guc, raw_volt, raw_akim, raw_isi))
             nonzero_metric_count = sum(bool(value) for value in (raw_guc, raw_volt, raw_akim, raw_isi) if value is not None)
@@ -307,12 +261,11 @@ def start_collector():
 
             for dev_id in config["slave_ids"]:
                 print(f"[{fab_id.upper()}] ID {dev_id}...", end=" ")
-                time.sleep(0.5)
+                time.sleep(0.5)  # Cihazlar arası geçişte kısa bekleme
                 data = read_device(client, dev_id, config)
                 if data:
                     veritabani.veri_ekle(dev_id, data, fabrika_id=fab_id)
                     hata_kodlari = [data.get(f"hata_kodu_{r}", 0) for r in [107,109,111,112,114,115,116,117,118,119,120,121,122]]
-                    # hata_kodu aslında hata_kodu key'inde
                     hata_kodlari[0] = data.get("hata_kodu", 0)
                     durum = "TEMIZ" if all(h == 0 for h in hata_kodlari) else "HATA"
                     print(f"[OK] {durum}")

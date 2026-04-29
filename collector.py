@@ -9,27 +9,24 @@ import veritabani
 
 import sys
 import io
-# Görünmez log sorununu çözmek için line_buffering=True eklendi
+# Logların görünmez olmasını engellemek için
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 WS_NOTIFY_URL = os.getenv("WS_NOTIFY_URL", "http://solar_api:8503/ws/notify")
 
 
 def _notify_websocket():
-    """API'ye bildirim göndererek WebSocket istemcilerini günceller."""
     try:
         import urllib.request
         req = urllib.request.Request(WS_NOTIFY_URL, data=b"", method="POST")
         req.add_header("Content-Type", "application/json")
         urllib.request.urlopen(req, timeout=2)
     except Exception:
-        pass  # WS bildirimi kritik değil, sessizce devam et
+        pass
 
 
 def load_config(fabrika_id="mekanik"):
-    """Veritabanindan fabrikaya özel ayarlari yukle."""
     ayarlar = veritabani.tum_ayarlari_oku(fabrika_id)
-
     slave_ids_raw = ayarlar.get("slave_ids", "1,2,3")
     slave_ids, parse_errors = utils.parse_id_list(slave_ids_raw)
 
@@ -68,26 +65,21 @@ def load_config(fabrika_id="mekanik"):
     }
 
 
-def read_device(client, slave_id, config, max_retries=3):
+# Ölü cihazlarda 4 dakika kilitlenmeyi önlemek için max_retries 1 yapıldı
+def read_device(client, slave_id, config, max_retries=1):
     for attempt in range(max_retries):
         try:
             if not client.connected:
                 client.connect()
                 time.sleep(0.1)
 
-            # --- YENİ AKILLI VE HIZLI OKUMA FONKSİYONU ---
             def hizli_oku(adres):
                 time.sleep(0.05)
-                # 1. İhtimal: Anlık veriler genelde Input Register'da (04) olur
                 rr = client.read_input_registers(address=adres, count=1, slave=slave_id)
-                
-                # 2. İhtimal: Eğer Input'ta yoksa veya hata verirse Holding Register'a (03) bak
                 if getattr(rr, 'isError', lambda: True)():
                     rr = client.read_holding_registers(address=adres, count=1, slave=slave_id)
-                    
                 return rr.registers[0] if not getattr(rr, 'isError', lambda: True)() else None
 
-            # Hantal cache mantığı silindi, doğrudan hızlı okuma yapılıyor
             raw_guc = hizli_oku(config["guc_addr"])
             raw_volt = hizli_oku(config["volt_addr"])
             raw_akim = hizli_oku(config["akim_addr"])
@@ -101,27 +93,11 @@ def read_device(client, slave_id, config, max_retries=3):
             if available_metric_count == 0 or (available_metric_count < 2 and nonzero_metric_count == 0):
                 if attempt < max_retries - 1:
                     time.sleep(0.75)
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
+                    try: client.close()
+                    except: pass
                     continue
-
-                logging.error(
-                    "Modbus veri yetersiz (ID=%s, kaynaklar G=%s V=%s A=%s T=%s)",
-                    slave_id,
-                    src_guc,
-                    src_volt,
-                    src_akim,
-                    src_isi,
-                )
-                try:
-                    client.close()
-                except Exception:
-                    pass
                 return None
 
-            # ── Değerleri hesapla ──
             val_guc = 0 if raw_guc is None else raw_guc * config["guc_scale"]
             val_volt = 0 if raw_volt is None else utils.to_signed16(raw_volt) * config["volt_scale"]
             val_akim = 0 if raw_akim is None else utils.to_signed16(raw_akim) * config["akim_scale"]
@@ -131,19 +107,6 @@ def read_device(client, slave_id, config, max_retries=3):
                 val_guc = round(val_volt * val_akim, 2)
 
             if val_guc == 0 and val_volt == 0 and val_akim == 0 and val_isi == 0:
-                if attempt < max_retries - 1:
-                    time.sleep(0.75)
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-                    continue
-
-                logging.error("Tum metrikler sifir dondu (ID=%s)", slave_id)
-                try:
-                    client.close()
-                except Exception:
-                    pass
                 return None
 
             print(
@@ -154,14 +117,8 @@ def read_device(client, slave_id, config, max_retries=3):
                 f"-> G={val_guc:.1f}W V={val_volt:.1f}V A={val_akim:.2f}A T={val_isi:.1f}C"
             )
 
-            veriler = {
-                "guc": val_guc,
-                "voltaj": val_volt,
-                "akim": val_akim,
-                "sicaklik": val_isi,
-            }
+            veriler = {"guc": val_guc, "voltaj": val_volt, "akim": val_akim, "sicaklik": val_isi}
 
-            # ── 5. Hata Kodları ──
             for reg in config["alarm_registers"]:
                 try:
                     time.sleep(0.05)
@@ -170,7 +127,7 @@ def read_device(client, slave_id, config, max_retries=3):
                         count=reg.get("count", 2),
                         slave=slave_id,
                     )
-                    if not r_hata.isError():
+                    if not getattr(r_hata, 'isError', lambda: True)():
                         if reg.get("count", 2) == 2:
                             veriler[reg["key"]] = (r_hata.registers[0] << 16) | r_hata.registers[1]
                         else:
@@ -185,37 +142,20 @@ def read_device(client, slave_id, config, max_retries=3):
         except Exception as exc:
             if attempt < max_retries - 1:
                 time.sleep(0.5)
-                try:
-                    client.close()
-                except Exception:
-                    pass
+                try: client.close()
+                except: pass
                 continue
-            else:
-                logging.error("ID %s hata: %s", slave_id, exc)
-                try:
-                    client.close()
-                except Exception:
-                    pass
-                return None
+            return None
 
 
 def otomatik_veri_temizle(config):
-    """
-    Ayarlara gore eski verileri otomatik temizle.
-    0 = sinirsiz saklama (temizleme yapma)
-    """
     saklama_gun = config.get("veri_saklama_gun", 365)
-
-    if saklama_gun == 0:
-        return 0
-
+    if saklama_gun == 0: return 0
     try:
         silinen = veritabani.eski_verileri_temizle(saklama_gun)
-        if silinen > 0:
-            print(f"\nOtomatik Temizlik: {silinen} kayit silindi ({saklama_gun} gunden eski)")
+        if silinen > 0: print(f"\nOtomatik Temizlik: {silinen} kayit silindi")
         return silinen
-    except Exception as exc:
-        print(f"\nOtomatik temizlik hatasi: {exc}")
+    except Exception:
         return 0
 
 
@@ -227,11 +167,11 @@ def start_collector():
 
     from veritabani import FABRIKALAR
 
-    # Her fabrika için config ve client tut
     fab_state = {}
     for fab_id, fab_info in FABRIKALAR.items():
         config = load_config(fab_id)
-        client = ModbusTcpClient(config["target_ip"], port=config["target_port"], timeout=5.0)
+        # Timeout 5.0'dan 1.5'e düşürüldü, ölü cihazları anında atlasın diye
+        client = ModbusTcpClient(config["target_ip"], port=config["target_port"], timeout=1.5)
         fab_state[fab_id] = {"config": config, "client": client}
         print(f"  {fab_info['ikon']} {fab_info['ad']}: {config['target_ip']}:{config['target_port']} IDs={config['slave_ids']}")
 
@@ -248,20 +188,20 @@ def start_collector():
             config = state["config"]
             client = state["client"]
 
-            # Ayar değişikliği kontrolü
             yeni_config = load_config(fab_id)
             if yeni_config != config:
                 if yeni_config["target_ip"] != config["target_ip"] or yeni_config["target_port"] != config["target_port"]:
                     print(f"\n[{fab_id.upper()}] IP/Port degisti, baglanti yenileniyor...")
                     client.close()
-                    client = ModbusTcpClient(yeni_config["target_ip"], port=yeni_config["target_port"], timeout=5.0)
+                    client = ModbusTcpClient(yeni_config["target_ip"], port=yeni_config["target_port"], timeout=1.5)
                     state["client"] = client
                 config = yeni_config
                 state["config"] = config
 
             for dev_id in config["slave_ids"]:
-                print(f"[{fab_id.upper()}] ID {dev_id}...", end=" ")
-                time.sleep(0.5)  # Cihazlar arası geçişte kısa bekleme
+                # BU SATIR KRİTİK: flush=True ile logun donmasını engelledik
+                print(f"[{fab_id.upper()}] ID {dev_id}...", end=" ", flush=True)
+                time.sleep(0.5)
                 data = read_device(client, dev_id, config)
                 if data:
                     veritabani.veri_ekle(dev_id, data, fabrika_id=fab_id)
@@ -282,7 +222,6 @@ def start_collector():
         elapsed = time.time() - start_time
         min_refresh = min(fab_state[f]["config"]["refresh_rate"] for f in fab_state)
         time.sleep(max(0, min_refresh - elapsed))
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.ERROR)

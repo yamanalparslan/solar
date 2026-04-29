@@ -87,15 +87,9 @@ def read_device(client, slave_id, config, max_retries=1):
             
             src_guc, src_volt, src_akim, src_isi = "hizli_oku", "hizli_oku", "hizli_oku", "hizli_oku"
 
-            available_metric_count = sum(value is not None for value in (raw_guc, raw_volt, raw_akim, raw_isi))
-            nonzero_metric_count = sum(bool(value) for value in (raw_guc, raw_volt, raw_akim, raw_isi) if value is not None)
-
-            if available_metric_count == 0 or (available_metric_count < 2 and nonzero_metric_count == 0):
-                if attempt < max_retries - 1:
-                    time.sleep(0.75)
-                    try: client.close()
-                    except: pass
-                    continue
+            # YENİ EKLENEN KISIM: Sadece bütün değerler None (cevap yok) ise cihazı atla. 
+            # Değerler 0 bile olsa kaydetmeye devam et.
+            if raw_guc is None and raw_volt is None and raw_akim is None and raw_isi is None:
                 return None
 
             val_guc = 0 if raw_guc is None else raw_guc * config["guc_scale"]
@@ -105,9 +99,6 @@ def read_device(client, slave_id, config, max_retries=1):
 
             if val_guc <= 0 and val_volt > 0 and val_akim > 0:
                 val_guc = round(val_volt * val_akim, 2)
-
-            if val_guc == 0 and val_volt == 0 and val_akim == 0 and val_isi == 0:
-                return None
 
             print(
                 f"  [Addr G={config['guc_addr']} V={config['volt_addr']} "

@@ -148,10 +148,10 @@ def _try_read_metric_sync(client, addr: int, slave_id: int, is_32bit: bool = Fal
     return None, None
 
 
-def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
+def read_device(client, slave_id: int, config: dict, max_retries: int = 2):
     """
-    Senkron Modbus okuma.
-    Her metrik icin holding + input + blok okuma fallback dener.
+    Senkron Modbus okuma (Modbus Poll mantığı ile Blok Okuma).
+    Parçalı sorgular yerine adres aralıklarını tek seferde okur.
     """
     for attempt in range(max_retries):
         try:
@@ -159,41 +159,40 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
                 client.connect()
                 time.sleep(0.1)
 
-            # ── Temel metrikler ──
-            raw_volt, volt_src = _try_read_metric_sync(client, config["volt_addr"], slave_id, is_32bit=False)
-            if raw_volt is None:
-                return None
+            # ── 1. ADIM: TEMEL METRİKLERİ TEK BİR BLOK OLARAK OKU ──
+            # Akım(25), Voltaj(28), Güç(33), Sıcaklık(44)
+            # 25'ten başlayıp 20 register okursak, 44 dahil hepsini tek pakette almış oluruz. (44 - 25 + 1 = 20)
+            start_addr = 25
+            count = 20 
+            
+            time.sleep(0.05)
+            rr_temel = client.read_holding_registers(address=start_addr, count=count, slave=slave_id)
+            
+            # Eğer okuma başarısızsa retry döngüsüne gir
+            if getattr(rr_temel, "isError", lambda: True)():
+                continue  
+            
+            regs = rr_temel.registers
+            
+            # Diziden (Array) değerleri cımbızla çekiyoruz (25 -> index 0, 28 -> index 3 vb.)
+            raw_akim = regs[config["akim_addr"] - start_addr]
+            raw_volt = regs[config["volt_addr"] - start_addr]
+            raw_guc  = regs[config["guc_addr"] - start_addr]
+            raw_isi  = regs[config["isi_addr"] - start_addr]
 
-            raw_guc,  guc_src  = _try_read_metric_sync(client, config["guc_addr"],  slave_id, is_32bit=True)
-            raw_akim, akim_src = _try_read_metric_sync(client, config["akim_addr"], slave_id, is_32bit=True)
-            raw_isi,  isi_src  = _try_read_metric_sync(client, config["isi_addr"],  slave_id, is_32bit=False)
-
-            # ── Deger Donusumu ──
+            # ── Değer Dönüşümleri ──
             val_volt = utils.to_signed16(raw_volt) * config["volt_scale"]
-            val_akim = (
-                0.0 if raw_akim is None
-                else utils.to_signed16(raw_akim) * config["akim_scale"]
-            )
-            val_guc = 0.0 if raw_guc is None else raw_guc * config["guc_scale"]
-            val_isi = (
-                0.0 if raw_isi is None
-                else utils.decode_temperature_register(raw_isi, config["isi_scale"])
-            )
+            val_akim = utils.to_signed16(raw_akim) * config["akim_scale"]
+            val_guc  = utils.to_signed16(raw_guc) * config["guc_scale"]
+            val_isi  = utils.decode_temperature_register(raw_isi, config["isi_scale"])
 
-            # Guc sifir ama V ve A gecerliyse hesapla
+            # Güç 0 hesaplaması
             if val_guc <= 0 and val_volt > 0 and val_akim > 0:
                 val_guc = round(val_volt * val_akim, 2)
 
-            # Tum sifir = veri yok
-            if val_guc == 0.0 and val_volt == 0.0 and val_akim == 0.0 and val_isi == 0.0:
-                return None
-
             print(
                 f"  [ID {slave_id}] "
-                f"V={val_volt:.1f}V({volt_src})  "
-                f"A={val_akim:.2f}A({akim_src})  "
-                f"G={val_guc:.1f}W({guc_src})  "
-                f"T={val_isi:.1f}C({isi_src})"
+                f"V={val_volt:.1f}V  A={val_akim:.2f}A  G={val_guc:.1f}W  T={val_isi:.1f}C"
             )
 
             veriler = {
@@ -203,25 +202,31 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
                 "sicaklik": val_isi,
             }
 
-            # ── Alarm Register'lari ──
-            for reg in config["alarm_registers"]:
-                try:
-                    time.sleep(0.05)
-                    count = reg.get("count", 2)
-                    r_hata = client.read_holding_registers(
-                        address=reg["addr"], count=count, slave=slave_id
-                    )
-                    if not getattr(r_hata, "isError", lambda: True)():
-                        regs = r_hata.registers
-                        if count == 2 and len(regs) >= 2:
-                            veriler[reg["key"]] = (regs[0] << 16) | regs[1]
-                        elif len(regs) >= 1:
-                            veriler[reg["key"]] = regs[0]
+            # ── 2. ADIM: ALARMLARI TEK BİR BLOK OLARAK OKU ──
+            # Alarmlar 107 ile 122 arasında. 107'den başlayıp 20 register okursak tüm alarmları yormadan almış oluruz.
+            alarm_start = 107
+            alarm_count = 20
+            
+            time.sleep(0.05)
+            rr_alarm = client.read_holding_registers(address=alarm_start, count=alarm_count, slave=slave_id)
+            
+            if not getattr(rr_alarm, "isError", lambda: True)():
+                alarm_regs = rr_alarm.registers
+                for reg in config["alarm_registers"]:
+                    a_addr = reg["addr"]
+                    a_count = reg.get("count", 2)
+                    offset = a_addr - alarm_start
+                    
+                    # Diziden taşma olmaması için güvenlik kontrolü
+                    if offset >= 0 and (offset + a_count) <= len(alarm_regs):
+                        if a_count == 2:
+                            veriler[reg["key"]] = (alarm_regs[offset] << 16) | alarm_regs[offset + 1]
                         else:
-                            veriler[reg["key"]] = 0
+                            veriler[reg["key"]] = alarm_regs[offset]
                     else:
                         veriler[reg["key"]] = 0
-                except Exception:
+            else:
+                for reg in config["alarm_registers"]:
                     veriler[reg["key"]] = 0
 
             return veriler
@@ -234,7 +239,6 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
                 continue
             logging.error("ID %d okuma hatasi (deneme %d): %s", slave_id, attempt + 1, exc)
             return None
-
 
 def otomatik_veri_temizle(config: dict) -> int:
     saklama_gun = config.get("veri_saklama_gun", 365)
@@ -299,7 +303,7 @@ def start_collector():
             for dev_id in config["slave_ids"]:
                 print(f"[{fab_id.upper()}] ID {dev_id}...", end=" ", flush=True)
                 time.sleep(0.5)
-                data = read_device(client, dev_id, config)
+                data = read_device(client, dev_id, config, max_retries= 3)
                 if data:
                     veritabani.veri_ekle(dev_id, data, fabrika_id=fab_id)
                     hata_kodlari = [data.get(f"hata_kodu_{r}", 0) for r in [107,109,111,112,114,115,116,117,118,119,120,121,122]]

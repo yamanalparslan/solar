@@ -192,14 +192,15 @@ async def read_device_async(
             await asyncio.sleep(0.1)
 
         # ── Temel metrikler ──
+        # ── Temel metrikler (Pulsar Dokümanına Göre Hepsi 16-bit UINT16) ──
+        # Cihazınız UINT16 kullandığı için is_32bit=False YAPILMALIDIR.
         raw_volt, volt_src = await _try_read_metric(client, config["volt_addr"], slave_id, is_32bit=False)
         if raw_volt is None:
             return slave_id, None
 
-        raw_guc,  guc_src  = await _try_read_metric(client, config["guc_addr"],  slave_id, is_32bit=True)
-        raw_akim, akim_src = await _try_read_metric(client, config["akim_addr"], slave_id, is_32bit=True)
+        raw_guc,  guc_src  = await _try_read_metric(client, config["guc_addr"],  slave_id, is_32bit=False)
+        raw_akim, akim_src = await _try_read_metric(client, config["akim_addr"], slave_id, is_32bit=False)
         raw_isi,  isi_src  = await _try_read_metric(client, config["isi_addr"],  slave_id, is_32bit=False)
-
         # ── Deger Donusumu ──
         val_volt = utils.to_signed16(raw_volt) * config["volt_scale"]
         val_akim = (

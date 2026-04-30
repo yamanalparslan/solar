@@ -87,22 +87,27 @@ def load_config(fabrika_id: str = "mekanik") -> dict:
 # Modbus Okuma Stratejisi
 # ─────────────────────────────────────────────
 
-def build_metric_candidates(start_addr: int) -> list:
+def build_metric_candidates(start_addr: int, is_32bit: bool = False) -> list:
     """
     Tek bir register adresi icin denenecek (func, addr, count, offset) adaylarini uretir.
+    32-bit (2 register) okuma destegi eklenmistir.
     """
     candidates = []
+    read_count = 2 if is_32bit else 1
+
     # Tekil okumalar
-    candidates.append(("holding", start_addr, 1, 0))
-    candidates.append(("input",   start_addr, 1, 0))
+    candidates.append(("holding", start_addr, read_count, 0))
+    candidates.append(("input",   start_addr, read_count, 0))
 
     # Blok okumalar (geriden ileri)
     max_lookback = min(4, start_addr + 1)
     for block_offset in range(max_lookback):
         block_start = start_addr - block_offset
         if block_start >= 0:
-            candidates.append(("input",   block_start, 4, block_offset))
-            candidates.append(("holding", block_start, 4, block_offset))
+            # 32-bit okunacaksa blok boyutu offset'i ve 2 register'i kapsamalidir
+            block_size = max(4, block_offset + read_count)
+            candidates.append(("input",   block_start, block_size, block_offset))
+            candidates.append(("holding", block_start, block_size, block_offset))
 
     return candidates
 
@@ -124,15 +129,22 @@ def _sync_read_registers(client, func: str, address: int, count: int, slave_id: 
         return None
 
 
-def _try_read_metric_sync(client, addr: int, slave_id: int) -> tuple:
+def _try_read_metric_sync(client, addr: int, slave_id: int, is_32bit: bool = False) -> tuple:
     """
     Bir metrik adresi icin tum adaylari sirayla dener.
+    is_32bit True ise, 2 adet 16-bit register okuyup birlestirir.
     Returns: (raw_value, func_adi) veya (None, None)
     """
-    for func, address, count, offset in build_metric_candidates(addr):
+    for func, address, count, offset in build_metric_candidates(addr, is_32bit):
         regs = _sync_read_registers(client, func, address, count, slave_id)
-        if regs is not None and len(regs) > offset:
-            return regs[offset], func
+        if regs is not None:
+            if is_32bit and len(regs) >= (offset + 2):
+                # 32-bit okuma: Iki register'i birlestir (High-Word, Low-Word)
+                combined_value = (regs[offset] << 16) | regs[offset + 1]
+                return combined_value, func
+            elif not is_32bit and len(regs) > offset:
+                # 16-bit okuma
+                return regs[offset], func
     return None, None
 
 
@@ -148,13 +160,13 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
                 time.sleep(0.1)
 
             # ── Temel metrikler ──
-            raw_volt, volt_src = _try_read_metric_sync(client, config["volt_addr"], slave_id)
+            raw_volt, volt_src = _try_read_metric_sync(client, config["volt_addr"], slave_id, is_32bit=False)
             if raw_volt is None:
                 return None
 
-            raw_guc,  guc_src  = _try_read_metric_sync(client, config["guc_addr"],  slave_id)
-            raw_akim, akim_src = _try_read_metric_sync(client, config["akim_addr"], slave_id)
-            raw_isi,  isi_src  = _try_read_metric_sync(client, config["isi_addr"],  slave_id)
+            raw_guc,  guc_src  = _try_read_metric_sync(client, config["guc_addr"],  slave_id, is_32bit=True)
+            raw_akim, akim_src = _try_read_metric_sync(client, config["akim_addr"], slave_id, is_32bit=True)
+            raw_isi,  isi_src  = _try_read_metric_sync(client, config["isi_addr"],  slave_id, is_32bit=False)
 
             # ── Deger Donusumu ──
             val_volt = utils.to_signed16(raw_volt) * config["volt_scale"]

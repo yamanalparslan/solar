@@ -112,22 +112,27 @@ def load_config(fabrika_id: str = "mekanik") -> dict:
 # Modbus Okuma Stratejisi - DUZELTME MERKEZI
 # ─────────────────────────────────────────────
 
-def build_metric_candidates(start_addr: int) -> list:
+def build_metric_candidates(start_addr: int, is_32bit: bool = False) -> list:
     """
     Tek bir register adresi icin denenecek (func, addr, count, offset) adaylarini uretir.
+    32-bit (2 register) okuma destegi eklenmistir.
     """
     candidates = []
+    read_count = 2 if is_32bit else 1
+
     # 1. Tekil okumalar (en hizli, once dene)
-    candidates.append(("holding", start_addr, 1, 0))
-    candidates.append(("input",   start_addr, 1, 0))
+    candidates.append(("holding", start_addr, read_count, 0))
+    candidates.append(("input",   start_addr, read_count, 0))
 
     # 2. Blok okumalar - start_addr'dan max 3 geri giderek farkli bloklar dene
     max_lookback = min(4, start_addr + 1)
     for block_offset in range(max_lookback):
         block_start = start_addr - block_offset
         if block_start >= 0:
-            candidates.append(("input",   block_start, 4, block_offset))
-            candidates.append(("holding", block_start, 4, block_offset))
+            # 32-bit okunacaksa blok boyutu offset'i ve 2 register'i kapsamalidir
+            block_size = max(4, block_offset + read_count)
+            candidates.append(("input",   block_start, block_size, block_offset))
+            candidates.append(("holding", block_start, block_size, block_offset))
 
     return candidates
 
@@ -152,15 +157,22 @@ async def _async_read_registers(
 
 
 async def _try_read_metric(
-    client, addr: int, slave_id: int
+    client, addr: int, slave_id: int, is_32bit: bool = False
 ) -> tuple:
     """
     Bir metrik adresi icin tum adaylari sirayla dener.
+    is_32bit True ise, 2 adet 16-bit register okuyup birlestirir.
     """
-    for func, address, count, offset in build_metric_candidates(addr):
+    for func, address, count, offset in build_metric_candidates(addr, is_32bit):
         regs = await _async_read_registers(client, func, address, count, slave_id)
-        if regs is not None and len(regs) > offset:
-            return regs[offset], func
+        if regs is not None:
+            if is_32bit and len(regs) >= (offset + 2):
+                # 32-bit okuma: Iki register'i birlestir (High-Word, Low-Word)
+                combined_value = (regs[offset] << 16) | regs[offset + 1]
+                return combined_value, func
+            elif not is_32bit and len(regs) > offset:
+                # 16-bit okuma
+                return regs[offset], func
     return None, None
 
 
@@ -180,13 +192,13 @@ async def read_device_async(
             await asyncio.sleep(0.1)
 
         # ── Temel metrikler ──
-        raw_volt, volt_src = await _try_read_metric(client, config["volt_addr"], slave_id)
+        raw_volt, volt_src = await _try_read_metric(client, config["volt_addr"], slave_id, is_32bit=False)
         if raw_volt is None:
             return slave_id, None
 
-        raw_guc,  guc_src  = await _try_read_metric(client, config["guc_addr"],  slave_id)
-        raw_akim, akim_src = await _try_read_metric(client, config["akim_addr"], slave_id)
-        raw_isi,  isi_src  = await _try_read_metric(client, config["isi_addr"],  slave_id)
+        raw_guc,  guc_src  = await _try_read_metric(client, config["guc_addr"],  slave_id, is_32bit=True)
+        raw_akim, akim_src = await _try_read_metric(client, config["akim_addr"], slave_id, is_32bit=True)
+        raw_isi,  isi_src  = await _try_read_metric(client, config["isi_addr"],  slave_id, is_32bit=False)
 
         # ── Deger Donusumu ──
         val_volt = utils.to_signed16(raw_volt) * config["volt_scale"]

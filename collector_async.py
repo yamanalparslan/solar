@@ -270,7 +270,7 @@ async def main_loop():
     from veritabani import FABRIKALAR
 
     print("=" * 65)
-    print("ASENKRON COLLECTOR BASLATILDI - Ana Collector (Coklu Fabrika)")
+    print("ASENKRON COLLECTOR BASLATILDI - Ana Collector (Birlesik Mod)")
     print("=" * 65)
 
     fab_configs: dict = {}
@@ -282,10 +282,16 @@ async def main_loop():
         fab_clients[fab_id] = AsyncModbusTcpClient(
             cfg["target_ip"], port=cfg["target_port"], timeout=3.0
         )
-        print(f"[{fab_id}] Hedef: {cfg['target_ip']}:{cfg['target_port']} | ID'ler: {cfg['slave_ids']}")
+        print(
+            f"  {fab_info['ikon']} {fab_info['ad']}: "
+            f"{cfg['target_ip']}:{cfg['target_port']} "
+            f"IDs={cfg['slave_ids']} Refresh={cfg['refresh_rate']}s"
+        )
+
+    print("=" * 65)
 
     temizlik_sayaci = 0
-    TEMIZLIK_PERIYODU = 1800
+    TEMIZLIK_PERIYODU = 1800  # saniye (30 dakika)
 
     while True:
         dongu_baslangic = time.time()
@@ -307,6 +313,7 @@ async def main_loop():
             cfg    = yeni_cfg
 
             if not cfg["slave_ids"]:
+                print(f"[{fab_id.upper()}] Slave ID listesi bos, atlandi.")
                 continue
 
             tasks = [read_device_async(client, dev_id, cfg) for dev_id in cfg["slave_ids"]]
@@ -323,9 +330,14 @@ async def main_loop():
                     hata_kodlari = [data.get(f"hata_kodu_{r}", 0) for r in [107,109,111,112,114,115,116,117,118,119,120,121,122]]
                     hata_kodlari[0] = data.get("hata_kodu", 0)
                     durum = "TEMIZ" if all(h == 0 for h in hata_kodlari) else "HATA"
-                    print(f"[Async/{fab_id}] ID {slave_id} | Guc: {data['guc']:.1f}W | {durum}")
+                    print(
+                        f"[{fab_id.upper()}] ID {slave_id} | "
+                        f"G={data['guc']:.1f}W  V={data['voltaj']:.1f}V  "
+                        f"A={data['akim']:.2f}A  T={data['sicaklik']:.1f}C  "
+                        f"[{durum}]"
+                    )
                 else:
-                    print(f"[Async/{fab_id}] ID {slave_id} Baglanti Yok")
+                    print(f"[{fab_id.upper()}] ID {slave_id} | [YOK / CEVAP YOK]")
 
         temizlik_sayaci += 1
         if temizlik_sayaci * min(c["refresh_rate"] for c in fab_configs.values()) >= TEMIZLIK_PERIYODU:

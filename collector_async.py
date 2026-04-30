@@ -115,30 +115,8 @@ def load_config(fabrika_id: str = "mekanik") -> dict:
 def build_metric_candidates(start_addr: int) -> list:
     """
     Tek bir register adresi icin denenecek (func, addr, count, offset) adaylarini uretir.
-
-    Okuma onceligi:
-      1. Tekil holding register  (FC3, count=1)
-      2. Tekil input  register   (FC4, count=1)
-      3. Blok input  okumalar    (FC4, count=4) - farkli block_start'lardan offset ile
-      4. Blok holding okumalar   (FC3, count=4) - ayni sekilde
-
-    Ornek: start_addr=73 icin
-      - ("holding", 73, 1, 0)
-      - ("input",   73, 1, 0)
-      - ("input",   73, 4, 0)  # blok 73'ten baslar, offset 0
-      - ("input",   72, 4, 1)  # blok 72'den baslar, 73 = offset 1
-      - ("input",   71, 4, 2)
-      - ("input",   70, 4, 3)  # en yaygin blok baslangici
-      - ... holding versiyonlari
-
-    Args:
-        start_addr: Okunmak istenen Modbus register adresi
-
-    Returns:
-        list of (func_name, address, count, offset) tuples
     """
     candidates = []
-
     # 1. Tekil okumalar (en hizli, once dene)
     candidates.append(("holding", start_addr, 1, 0))
     candidates.append(("input",   start_addr, 1, 0))
@@ -178,8 +156,6 @@ async def _try_read_metric(
 ) -> tuple:
     """
     Bir metrik adresi icin tum adaylari sirayla dener.
-    Ilk basarili okumada (raw_value, func_adi) doner.
-    Hic okunamazsa (None, None) doner.
     """
     for func, address, count, offset in build_metric_candidates(addr):
         regs = await _async_read_registers(client, func, address, count, slave_id)
@@ -197,15 +173,6 @@ async def read_device_async(
 ) -> tuple:
     """
     Tek bir inverter cihazindan tum verileri asenkron okur.
-
-    Hata Duzeltme Noktasi:
-    - Voltaj/Akim icin to_signed16() kullanilir (negatif deger destegi)
-    - Sicaklik icin decode_temperature_register() ile otomatik scale tespiti
-    - Guc sifir ama V ve A gecerliyse P = V * I ile hesaplanir
-    - Tum degerler sifirsa None doner (kayit atlanir)
-
-    Returns:
-        (slave_id, veriler_dict) veya (slave_id, None)
     """
     try:
         if not client.connected:
@@ -215,7 +182,6 @@ async def read_device_async(
         # ── Temel metrikler ──
         raw_volt, volt_src = await _try_read_metric(client, config["volt_addr"], slave_id)
         if raw_volt is None:
-            # Voltaj okunamazsa cihaz yanit vermiyor
             return slave_id, None
 
         raw_guc,  guc_src  = await _try_read_metric(client, config["guc_addr"],  slave_id)
@@ -223,38 +189,23 @@ async def read_device_async(
         raw_isi,  isi_src  = await _try_read_metric(client, config["isi_addr"],  slave_id)
 
         # ── Deger Donusumu ──
-        # Voltaj ve Akim: signed16 donusumu zorunlu (bazi invertorler negatif gonder)
         val_volt = utils.to_signed16(raw_volt) * config["volt_scale"]
         val_akim = (
             0.0 if raw_akim is None
             else utils.to_signed16(raw_akim) * config["akim_scale"]
         )
-        # Guc: genellikle unsigned, signed gerekmiyor
         val_guc = 0.0 if raw_guc is None else raw_guc * config["guc_scale"]
-        # Sicaklik: otomatik scale tespiti (0.1/0.01/0.001 dener)
         val_isi = (
             0.0 if raw_isi is None
             else utils.decode_temperature_register(raw_isi, config["isi_scale"])
         )
 
-        # Guc kaydi yoksa veya sifirsa V*I ile hesapla
         if val_guc <= 0 and val_volt > 0 and val_akim > 0:
             val_guc = round(val_volt * val_akim, 2)
 
-        # Tum degerler sifir = cihaz kapali veya veri yok, kaydetme
         if val_guc == 0.0 and val_volt == 0.0 and val_akim == 0.0 and val_isi == 0.0:
             logger.debug("ID %d: Tum degerler sifir, kayit atlandi", slave_id)
             return slave_id, None
-
-        # Okuma kaynagi loglama (hata ayiklama icin)
-        logger.debug(
-            "ID %d | G=%.1fW[%s] V=%.1fV[%s] A=%.2fA[%s] T=%.1f°C[%s]",
-            slave_id,
-            val_guc,  guc_src  or "N/A",
-            val_volt, volt_src or "N/A",
-            val_akim, akim_src or "N/A",
-            val_isi,  isi_src  or "N/A",
-        )
 
         veriler = {
             "guc":      val_guc,
@@ -273,7 +224,6 @@ async def read_device_async(
                 )
                 if regs is not None:
                     if count == 2 and len(regs) >= 2:
-                        # 32-bit hata kodu: iki register birlestir
                         veriler[reg["key"]] = (regs[0] << 16) | regs[1]
                     elif count == 1 and len(regs) >= 1:
                         veriler[reg["key"]] = regs[0]
@@ -296,7 +246,6 @@ async def read_device_async(
 # ─────────────────────────────────────────────
 
 def otomatik_veri_temizle(config: dict) -> int:
-    """Ayarlardaki saklama suresine gore eski kayitlari siler."""
     saklama_gun = config.get("veri_saklama_gun", 365)
     if saklama_gun == 0:
         return 0
@@ -316,16 +265,12 @@ def otomatik_veri_temizle(config: dict) -> int:
 async def main_loop():
     """
     Tum fabrikalari asenkron tarar.
-    - Ayar degisikliklerini canli algilar (IP/port degisince client yenilenir)
-    - Tum slave'leri paralel okur (asyncio.gather)
-    - Her dongu sonunda WebSocket API'yi bilgilendirir
-    - 30 dakikada bir eski kayitlari temizler
     """
     veritabani.init_db()
     from veritabani import FABRIKALAR
 
     print("=" * 65)
-    print("ASENKRON COLLECTOR BASLATILDI - Ana Collector (Birlesik Mod)")
+    print("ASENKRON COLLECTOR BASLATILDI - Ana Collector (Coklu Fabrika)")
     print("=" * 65)
 
     fab_configs: dict = {}
@@ -337,22 +282,15 @@ async def main_loop():
         fab_clients[fab_id] = AsyncModbusTcpClient(
             cfg["target_ip"], port=cfg["target_port"], timeout=3.0
         )
-        print(
-            f"  {fab_info['ikon']} {fab_info['ad']}: "
-            f"{cfg['target_ip']}:{cfg['target_port']} "
-            f"IDs={cfg['slave_ids']} Refresh={cfg['refresh_rate']}s"
-        )
-
-    print("=" * 65)
+        print(f"[{fab_id}] Hedef: {cfg['target_ip']}:{cfg['target_port']} | ID'ler: {cfg['slave_ids']}")
 
     temizlik_sayaci = 0
-    TEMIZLIK_PERIYODU = 1800  # saniye (30 dakika)
+    TEMIZLIK_PERIYODU = 1800
 
     while True:
         dongu_baslangic = time.time()
 
         for fab_id in FABRIKALAR:
-            # ── Ayar degisikligi kontrolu ──
             yeni_cfg = load_config(fab_id)
             eski_cfg = fab_configs[fab_id]
 
@@ -369,62 +307,38 @@ async def main_loop():
             cfg    = yeni_cfg
 
             if not cfg["slave_ids"]:
-                print(f"[{fab_id.upper()}] Slave ID listesi bos, atlandi.")
                 continue
 
-            # ── Tum cihazlari paralel oku ──
-            tasks = [
-                read_device_async(client, dev_id, cfg)
-                for dev_id in cfg["slave_ids"]
-            ]
+            tasks = [read_device_async(client, dev_id, cfg) for dev_id in cfg["slave_ids"]]
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # ── Sonuclari isleme ve kaydet ──
             for result in results:
                 if isinstance(result, Exception):
                     logger.error("Gorev istisnasi: %s", result)
                     continue
 
                 slave_id, data = result
-
                 if data:
                     veritabani.veri_ekle(slave_id, data, fabrika_id=fab_id)
-
-                    hata_var = data.get("hata_kodu", 0) != 0 or any(
-                        data.get(f"hata_kodu_{r}", 0) != 0
-                        for r in [109, 111, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122]
-                    )
-                    durum = "[HATA]" if hata_var else "[TEMIZ]"
-
-                    print(
-                        f"[{fab_id.upper()}] ID {slave_id} | "
-                        f"G={data['guc']:.1f}W  V={data['voltaj']:.1f}V  "
-                        f"A={data['akim']:.2f}A  T={data['sicaklik']:.1f}C  "
-                        f"{durum}"
-                    )
+                    hata_kodlari = [data.get(f"hata_kodu_{r}", 0) for r in [107,109,111,112,114,115,116,117,118,119,120,121,122]]
+                    hata_kodlari[0] = data.get("hata_kodu", 0)
+                    durum = "TEMIZ" if all(h == 0 for h in hata_kodlari) else "HATA"
+                    print(f"[Async/{fab_id}] ID {slave_id} | Guc: {data['guc']:.1f}W | {durum}")
                 else:
-                    print(f"[{fab_id.upper()}] ID {slave_id} | [YOK / CEVAP YOK]")
+                    print(f"[Async/{fab_id}] ID {slave_id} Baglanti Yok")
 
-        # ── Periyodik veri temizligi ──
         temizlik_sayaci += 1
         if temizlik_sayaci * min(c["refresh_rate"] for c in fab_configs.values()) >= TEMIZLIK_PERIYODU:
             for fab_id in FABRIKALAR:
                 otomatik_veri_temizle(fab_configs[fab_id])
             temizlik_sayaci = 0
 
-        # ── WebSocket bildirimi ──
         await _notify_websocket()
 
-        # ── Bir sonraki donguye kadar bekle ──
         gecen = time.time() - dongu_baslangic
         min_refresh = min(c["refresh_rate"] for c in fab_configs.values())
-        bekle = max(1.0, min_refresh - gecen)
-        await asyncio.sleep(bekle)
+        await asyncio.sleep(max(1.0, min_refresh - gecen))
 
-
-# ─────────────────────────────────────────────
-# Giris Noktasi
-# ─────────────────────────────────────────────
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.ERROR)

@@ -17,10 +17,16 @@ logout_button()
 
 veritabani.init_db()
 
+from veritabani import FABRIKALAR
+if 'fabrika_id' not in st.session_state or st.session_state.fabrika_id is None:
+    st.warning("Lütfen ana sayfadan bir fabrika seçin.")
+    st.stop()
+fab_id = st.session_state.fabrika_id
+
 st.title("Cihaz Karsilastirma")
 section_header("", "Coklu Cihaz Analizi", "Secilen cihazlarin performansini yan yana karsilastirin")
 
-ayarlar = veritabani.tum_ayarlari_oku()
+ayarlar = veritabani.tum_ayarlari_oku(fab_id)
 slave_ids, _ = utils.parse_id_list(ayarlar.get('slave_ids', '1,2,3'))
 
 secili = st.multiselect("Karsilastirilacak Cihazlar:", slave_ids, default=slave_ids[:3])
@@ -30,8 +36,8 @@ metrik = st.selectbox("Metrik:", ["guc", "voltaj", "akim", "sicaklik"],
 metrik_birim = {"guc": "W", "voltaj": "V", "akim": "A", "sicaklik": "C"}
 metrik_baslik = {"guc": "Guc Karsilastirma", "voltaj": " Voltaj Karlatrma", "akim": "Akim Karsilastirma", "sicaklik": "Sicaklik Karsilastirma"}
 
-# Veritabanndan dnen stunlar: zaman, guc, voltaj, akim, sicaklik, hata_kodu, hata_kodu_193
-DB_COLUMNS = ["ts", "guc", "voltaj", "akim", "sicaklik", "hata_kodu", "hata_kodu_193"]
+# Veritabanından dönen sütunlar (son_verileri_getir)
+DB_COLUMNS = ["ts", "guc", "voltaj", "akim", "sicaklik", "hata_kodu", "hata_kodu_109", "hata_kodu_111", "hata_kodu_112", "hata_kodu_114", "hata_kodu_115", "hata_kodu_116", "hata_kodu_117", "hata_kodu_118", "hata_kodu_119", "hata_kodu_120", "hata_kodu_121", "hata_kodu_122"]
 
 if secili:
     colors = ['#6366f1', '#ec4899', '#10b981', '#f59e0b', '#a855f7', '#f97316', '#22d3ee', '#e879f9']
@@ -39,7 +45,7 @@ if secili:
     ozet_veriler = []
 
     for i, did in enumerate(secili):
-        data = veritabani.son_verileri_getir(did, limit=200)
+        data = veritabani.son_verileri_getir(did, limit=200, fabrika_id=fab_id)
         if not data:
             continue
         

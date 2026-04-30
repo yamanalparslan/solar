@@ -24,14 +24,16 @@ from pymodbus.client import ModbusTcpClient
 import utils
 import veritabani
 
-sys.stdout = io.TextIOWrapper(
-    sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
-)
+# UTF-8 stdout (Windows uyumlulugu)
+if hasattr(sys.stdout, "buffer"):
+    sys.stdout = io.TextIOWrapper(
+        sys.stdout.buffer, encoding="utf-8", errors="replace", line_buffering=True
+    )
 
 WS_NOTIFY_URL = os.getenv("WS_NOTIFY_URL", "http://solar_api:8503/ws/notify")
 
-
 def _notify_websocket():
+    """Collector veri yazdiktan sonra API'ye bildirim gonderir."""
     try:
         import urllib.request
         req = urllib.request.Request(WS_NOTIFY_URL, data=b"", method="POST")
@@ -88,21 +90,8 @@ def load_config(fabrika_id: str = "mekanik") -> dict:
 def build_metric_candidates(start_addr: int) -> list:
     """
     Tek bir register adresi icin denenecek (func, addr, count, offset) adaylarini uretir.
-
-    Strateji:
-      1. Tekil holding register  (FC3, count=1)
-      2. Tekil input  register   (FC4, count=1)
-      3. Blok okumalar (count=4): start_addr'dan geriye 0-3 offset ile farkli bloklar
-
-    Ornek - start_addr=73:
-      ("holding", 73, 1, 0), ("input", 73, 1, 0),
-      ("input",  73, 4, 0),  ("holding", 73, 4, 0),
-      ("input",  72, 4, 1),  ("holding", 72, 4, 1),
-      ("input",  71, 4, 2),  ("holding", 71, 4, 2),
-      ("input",  70, 4, 3),  ("holding", 70, 4, 3)  <-- en yaygin blok
     """
     candidates = []
-
     # Tekil okumalar
     candidates.append(("holding", start_addr, 1, 0))
     candidates.append(("input",   start_addr, 1, 0))
@@ -150,12 +139,7 @@ def _try_read_metric_sync(client, addr: int, slave_id: int) -> tuple:
 def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
     """
     Senkron Modbus okuma.
-
     Her metrik icin holding + input + blok okuma fallback dener.
-    Signed16 donusumu ve sicaklik scale tespiti uygulanir.
-
-    Returns:
-        dict (veriler) veya None (cihaz yanitsiz / tum degerler sifir)
     """
     for attempt in range(max_retries):
         try:
@@ -233,10 +217,8 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 1):
         except Exception as exc:
             if attempt < max_retries - 1:
                 time.sleep(0.5)
-                try:
-                    client.close()
-                except Exception:
-                    pass
+                try: client.close()
+                except: pass
                 continue
             logging.error("ID %d okuma hatasi (deneme %d): %s", slave_id, attempt + 1, exc)
             return None
@@ -254,7 +236,6 @@ def otomatik_veri_temizle(config: dict) -> int:
     except Exception:
         return 0
 
-
 def start_collector():
     """Senkron collector baslangici (geriye donuk uyumluluk / test)."""
     veritabani.init_db()
@@ -268,6 +249,7 @@ def start_collector():
     fab_state = {}
     for fab_id, fab_info in FABRIKALAR.items():
         config = load_config(fab_id)
+        # Timeout suresi invertor cevap verebilsin diye 3.0 saniyeye cikarildi
         client = ModbusTcpClient(
             config["target_ip"], port=config["target_port"], timeout=3.0
         )
@@ -308,11 +290,10 @@ def start_collector():
                 data = read_device(client, dev_id, config)
                 if data:
                     veritabani.veri_ekle(dev_id, data, fabrika_id=fab_id)
-                    hata_var = data.get("hata_kodu", 0) != 0 or any(
-                        data.get(f"hata_kodu_{r}", 0) != 0
-                        for r in [109, 111, 112, 114, 115, 116, 117, 118, 119, 120, 121, 122]
-                    )
-                    print("[OK]" if not hata_var else "[OK - HATA KODU VAR]")
+                    hata_kodlari = [data.get(f"hata_kodu_{r}", 0) for r in [107,109,111,112,114,115,116,117,118,119,120,121,122]]
+                    hata_kodlari[0] = data.get("hata_kodu", 0)
+                    durum = "TEMIZ" if all(h == 0 for h in hata_kodlari) else "HATA"
+                    print(f"[OK] {durum}")
                 else:
                     print("[YOK]")
 
@@ -327,7 +308,6 @@ def start_collector():
         gecen = time.time() - baslangic
         min_refresh = min(s["config"]["refresh_rate"] for s in fab_state.values())
         time.sleep(max(0, min_refresh - gecen))
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.ERROR)

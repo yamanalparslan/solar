@@ -180,6 +180,9 @@ def read_device(client, slave_id: int, config: dict, max_retries: int = 3):
                 continue  
             
             regs = rr_temel.registers
+
+            if len(regs) < count:
+                continue
             
             # Değerleri diziden dinamik ofset hesaplayarak al (Güvenli yöntem)
             raw_akim = regs[config["akim_addr"] - start_addr]

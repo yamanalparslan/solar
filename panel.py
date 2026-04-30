@@ -412,9 +412,9 @@ def guncel_verileri_goster():
                         mode="gauge+number",
                         value=dev_guc,
                         title={'text': f"ID:{dev_id}", 'font': {'size': 14, 'color': '#94a3b8', 'family': 'Inter'}},
-                        number={'suffix': 'W', 'font': {'size': 22, 'color': durum_renk, 'family': 'Inter'}},
+                        number={'suffix': 'kW', 'font': {'size': 22, 'color': durum_renk, 'family': 'Inter'}},
                         gauge={
-                            'axis': {'range': [0, 10000], 'tickcolor': '#334155', 'tickfont': {'color': '#475569'}},
+                            'axis': {'range': [0, 1000], 'tickcolor': '#334155', 'tickfont': {'color': '#475569'}},
                             'bar': {'color': durum_renk},
                             'bgcolor': 'rgba(15, 23, 42, 0.6)',
                             'borderwidth': 1,
